@@ -70,55 +70,7 @@ Open the URL Vite prints — http://localhost:5173 unless that port is taken, in
 > out quickly. The default is a `-lite` alias for exactly this reason; if you exhaust it, point
 > `GEMINI_MODEL` at another model and you get a fresh daily bucket.
 
----
 
-## The prompts
-
-All three prompts and all three response schemas live in one file:
-**`backend/src/main/java/com/flexiple/sourcing/Prompts.java`**.
-
-| Call | Input | Output |
-| --- | --- | --- |
-| `PARSE_SYSTEM` | the recruiter's free text | `{ filters, rubric }` |
-| `SCORE_SYSTEM` | the rubric + every profile that survived the filters | `{ scores: [{ id, score, reason, evidence, concerns }] }` |
-| `REFINE_SYSTEM` | current filters + rubric + the profiles on screen + all earlier feedback + the new message | `{ reply, changes, filters, rubric }` |
-
-Every call goes out with Gemini's `responseSchema` and `responseMimeType: application/json`, so the
-model is constrained while it generates rather than parsed hopefully afterwards. Temperature is 0.2 —
-sourcing should be repeatable, not creative. `thinkingBudget` is 0: none of the three calls needs
-chain-of-thought, and leaving it on tripled every round trip (a search went from ~8s to ~40s). Models
-that don't accept the field answer with a bare "invalid argument", so any 400 makes the client drop
-`thinkingConfig` and retry once rather than failing the request.
-
-### Filters are grounded in the real data
-
-The parse and refine prompts are handed the talent map's actual vocabulary — its 13 distinct titles,
-9 locations and 45 skills — and told never to write a filter value the map does not contain.
-
-This came out of a real failure. On the assignment's own example query, *"RDS developers with 4-7
-years of experience who have worked at startups, for a role based in Bangalore"*, the model produced
-`title_keywords: ["Developer"]`. Not one of the 48 records says "Developer" — they all say
-"Engineer". A perfectly defensible filter silently returned **0 of 48**. Grounding the prompt in the
-real vocabulary fixed the cause rather than the symptom, and it is cheap. The same query now returns
-6 matches with `title_keywords: ["Engineer"]`.
-
----
-
-## How the loop works
-
-```
-free text ──► PARSE (LLM) ──► filters + rubric
-                                  │
-                   filters ──► ProfileStore.filter()   plain Java, no LLM, 48 records
-                                  │
-                   survivors ──► SCORE (LLM) ──► ranked results
-                                  │
-              recruiter feedback ──► REFINE (LLM) ──► new filters + rubric ──┐
-                                  │                                          │
-                                  └──────────────── re-run ──────────────────┘
-                                  │
-                               freeze ──► final filters, rubric, ranked shortlist
-```
 
 **One session object is the whole API.** Every endpoint returns the complete `SearchSession` —
 filters, rubric, results, counts, round number and chat log. The frontend redraws from it wholesale,
@@ -139,27 +91,6 @@ number — and returns `evidence` chips lifted straight from the profile plus ho
 
 ---
 
-## Failure handling
-
-Nothing here is decorative — each case is reachable and each one has a designed state.
-
-| Failure | What happens |
-| --- | --- |
-| `GEMINI_API_KEY` missing | Caught at the first call, non-retryable, message names the variable. The search screen also warns before you type. |
-| Rate limit (429) or Gemini 5xx | Retried 3× with 1.5s / 3s backoff, then surfaced as **retryable** — the UI shows a Retry button that replays the exact same action. |
-| Timeout | 45s per request, 15s connect. Same retry path. |
-| Bad key, 403, blocked content | Reported immediately as **not** retryable, with a message that says what to fix. No pointless retries. |
-| Unknown / retired model (404) | Not retryable, and the message hands you the URL that lists the models your key does have. |
-| Model rejects `thinkingConfig` | The client drops the field and retries automatically, so lite and older models still work. |
-| Daily quota exhausted (429) | Retried, then reported as retryable with a Retry button. Switching `GEMINI_MODEL` gives a fresh daily bucket. |
-| Malformed / fenced JSON | Markdown fences stripped, then retried; a persistent failure is retryable and reported, never a crash. |
-| Model skips a profile | That candidate is still shown, at the bottom, flagged "Not scored this round" — quietly losing someone who passed the filters is worse than admitting the scorer missed one. |
-| Model invents a profile id | Dropped. A card must point at a real person. |
-| Refine or re-score fails mid-round | Filters, rubric and results roll back to the last good round. The recruiter keeps looking at valid results instead of a blank page, and their message is not double-logged on retry. |
-| Filters match nobody | Designed empty state that says which filters are likely doing the damage, with two one-click ways out. |
-| Backend not running | The frontend says exactly that, and offers Retry. |
-
----
 
 ## Decisions
 
